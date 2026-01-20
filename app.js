@@ -6,23 +6,21 @@ const stopBtn = document.getElementById("stopBtn");
 const statusText = document.getElementById("statusText");
 const lastHit = document.getElementById("lastHit");
 
-const LS_KEY = "opc_collection_v2"; // neue Version, damit alte Bilddaten nicht stören
+const LS_KEY = "opc_collection_manabox_like_v1";
 let collection = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
 
 let stream = null;
 let rafId = null;
 
-// Work canvas (Frames) – nur RAM, nichts wird gespeichert
 const work = document.createElement("canvas");
 const wctx = work.getContext("2d", { willReadFrequently: true });
 
-// Stabilität
 let stableCount = 0;
 let lastRect = null;
 let lastScanAt = 0;
 const SCAN_COOLDOWN_MS = 2000;
 
-// OCR Worker
+// OCR (Tesseract.js muss in index.html eingebunden sein)
 let ocrReady = false;
 let ocrWorker = null;
 
@@ -102,7 +100,7 @@ startBtn.onclick = async () => {
     startBtn.hidden = true;
     stopBtn.hidden = false;
 
-    setStatus("läuft", "Halte die Kartennummer (z.B. OP01-001) unten sichtbar ins Bild.");
+    setStatus("läuft", "Halte die Kartennummer (OP01-001, ST05-002 …) unten sichtbar ins Bild.");
     loop();
   } catch (e) {
     alert("Kamera konnte nicht geöffnet werden. Bitte in Safari erlauben (HTTPS).");
@@ -139,7 +137,6 @@ function drawOverlay(rect) {
   const octx = overlay.getContext("2d");
   octx.clearRect(0, 0, overlay.width, overlay.height);
 
-  // Zielrahmen (UI-Hilfe)
   octx.lineWidth = 4;
   octx.strokeStyle = "rgba(255,255,255,0.25)";
   const padX = overlay.width * 0.10;
@@ -165,8 +162,7 @@ function maybeAutoScan(rect) {
     const dy = Math.abs(rect.y - lastRect.y);
     const dw = Math.abs(rect.w - lastRect.w);
     const dh = Math.abs(rect.h - lastRect.h);
-    if (dx < tol && dy < tol && dw < tol && dh < tol) stableCount++;
-    else stableCount = 0;
+    stableCount = (dx < tol && dy < tol && dw < tol && dh < tol) ? stableCount + 1 : 0;
   }
   lastRect = rect;
 
@@ -183,7 +179,7 @@ async function autoOCRAndAdd(rect) {
   await ensureOCR();
   setStatus("scannt...", "Lese Kartencode...");
 
-  // Nur unteren Streifen als Canvas (RAM), KEIN toDataURL, KEIN Speichern
+  // NUR Canvas für OCR (RAM). KEIN toDataURL. KEIN Speichern.
   const stripCanvas = cropBottomStripCanvas(rect);
 
   const { data } = await ocrWorker.recognize(stripCanvas);
@@ -223,7 +219,7 @@ function cropBottomStripCanvas(rect) {
 
   cctx.drawImage(work, x, y, w, h, 0, 0, w, h);
 
-  // schnelle Binarisierung zur OCR-Hilfe
+  // binarize für OCR
   const img = cctx.getImageData(0, 0, w, h);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
@@ -239,21 +235,23 @@ function cropBottomStripCanvas(rect) {
 function extractCardId(text) {
   const cleaned = text.replace(/[^A-Z0-9\- ]/g, " ");
 
+  // OP01-001 / ST05-002 / EB01-001
   let m = cleaned.match(/\b(OP|ST|EB)\s*0?(\d{1,2})\s*-\s*(\d{3})\b/);
   if (m) return `${m[1]}${m[2].padStart(2, "0")}-${m[3]}`;
 
+  // ohne Bindestrich
   m = cleaned.match(/\b(OP|ST|EB)\s*0?(\d{1,2})\s+(\d{3})\b/);
   if (m) return `${m[1]}${m[2].padStart(2, "0")}-${m[3]}`;
 
-  m = cleaned.match(/\bP\s*-\s*(\d{3})\b/);
-  if (m) return `P-${m[1]}`;
-  m = cleaned.match(/\bP\s+(\d{3})\b/);
+  // Promo P-001
+  m = cleaned.match(/\bP\s*-\s*(\d{3})\b/) || cleaned.match(/\bP\s+(\d{3})\b/);
   if (m) return `P-${m[1]}`;
 
   return null;
 }
 
 async function fetchCardData(cardId) {
+  // Beispiel-API (best effort)
   const tries = [
     `https://optcgapi.com/api/sets/card/${encodeURIComponent(cardId)}/`,
     `https://optcgapi.com/api/decks/card/${encodeURIComponent(cardId)}/`,
@@ -262,7 +260,7 @@ async function fetchCardData(cardId) {
 
   for (const url of tries) {
     try {
-      const r = await fetch(url, { method: "GET" });
+      const r = await fetch(url);
       if (!r.ok) continue;
       return await r.json();
     } catch {}
@@ -278,7 +276,6 @@ function addOrIncrement(card) {
   render();
 }
 
-/* --- Rechteck-Erkennung (wie vorher) --- */
 function detectCardRect(imageData, W, H) {
   const DS = 3;
   const w = Math.floor(W / DS);
@@ -330,13 +327,10 @@ function detectCardRect(imageData, W, H) {
       }
     }
   }
-
   if (hits < (w * h) * 0.002) return null;
 
-  const x = minX * DS;
-  const y = minY * DS;
-  const rw = (maxX - minX) * DS;
-  const rh = (maxY - minY) * DS;
+  const x = minX * DS, y = minY * DS;
+  const rw = (maxX - minX) * DS, rh = (maxY - minY) * DS;
 
   const ratio = rw / rh;
   if (ratio < 0.55 || ratio > 0.95) return null;
@@ -347,9 +341,7 @@ function detectCardRect(imageData, W, H) {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, m => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[m]));
+  return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
 
 render();
