@@ -6,31 +6,26 @@ const stopBtn = document.getElementById("stopBtn");
 const statusText = document.getElementById("statusText");
 const lastHit = document.getElementById("lastHit");
 
-const LS_KEY = "opc_collection_manabox_like_v1";
+const LS_KEY = "opc_collection_artscan_v1";
 let collection = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
 
+let db = null;            // hashes.json
 let stream = null;
 let rafId = null;
 
 const work = document.createElement("canvas");
 const wctx = work.getContext("2d", { willReadFrequently: true });
 
-let stableCount = 0;
-let lastRect = null;
 let lastScanAt = 0;
-const SCAN_COOLDOWN_MS = 2000;
-
-// OCR (Tesseract.js muss in index.html eingebunden sein)
-let ocrReady = false;
-let ocrWorker = null;
+const COOLDOWN_MS = 900;
 
 function save() {
   localStorage.setItem(LS_KEY, JSON.stringify(collection));
 }
-
 function render() {
   list.innerHTML = "";
-  collection.forEach((c, i) => {
+  for (let i = 0; i < collection.length; i++) {
+    const c = collection[i];
     const li = document.createElement("li");
     li.innerHTML = `
       <strong>${escapeHtml(c.name || c.cardId)}</strong>
@@ -40,16 +35,22 @@ function render() {
       const ok = confirm(`Eintrag löschen?\n\n${c.cardId}`);
       if (!ok) return;
       collection.splice(i, 1);
-      save();
-      render();
+      save(); render();
     };
     list.appendChild(li);
-  });
+  }
 }
-
-function setStatus(s, extra = "") {
+function setStatus(s, extra="") {
   statusText.textContent = s;
   lastHit.textContent = extra;
+}
+
+async function loadHashes() {
+  const r = await fetch("./hashes.json", { cache: "no-store" });
+  if (!r.ok) throw new Error("hashes.json nicht gefunden");
+  const data = await r.json();
+  if (!Array.isArray(data)) throw new Error("hashes.json Format falsch");
+  return data;
 }
 
 function stopAll() {
@@ -62,9 +63,6 @@ function stopAll() {
   }
   video.srcObject = null;
 
-  stableCount = 0;
-  lastRect = null;
-
   stopBtn.hidden = true;
   startBtn.hidden = false;
 
@@ -75,10 +73,14 @@ function stopAll() {
 }
 
 startBtn.onclick = async () => {
-  stopAll();
-  setStatus("Kamera startet...");
-
   try {
+    if (!db) {
+      setStatus("lade Datenbank...", "hashes.json wird geladen");
+      db = await loadHashes();
+      setStatus("bereit", `Datenbank geladen: ${db.length} Karten`);
+    }
+
+    setStatus("Kamera startet...");
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false
@@ -100,10 +102,10 @@ startBtn.onclick = async () => {
     startBtn.hidden = true;
     stopBtn.hidden = false;
 
-    setStatus("läuft", "Halte die Kartennummer (OP01-001, ST05-002 …) unten sichtbar ins Bild.");
+    setStatus("läuft", "Karte mittig halten – wird automatisch erkannt.");
     loop();
   } catch (e) {
-    alert("Kamera konnte nicht geöffnet werden. Bitte in Safari erlauben (HTTPS).");
+    alert("Start fehlgeschlagen. Prüfe: hashes.json vorhanden + Kamera in Safari erlaubt.");
     console.error(e);
     stopAll();
   }
@@ -111,237 +113,140 @@ startBtn.onclick = async () => {
 
 stopBtn.onclick = stopAll;
 
-async function ensureOCR() {
-  if (ocrReady) return;
-  setStatus("OCR wird vorbereitet...");
-  ocrWorker = await Tesseract.createWorker("eng");
-  await ocrWorker.setParameters({
-    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-",
-  });
-  ocrReady = true;
-  setStatus("läuft", "OCR bereit.");
-}
-
 function loop() {
   wctx.drawImage(video, 0, 0, work.width, work.height);
-  const img = wctx.getImageData(0, 0, work.width, work.height);
 
-  const rect = detectCardRect(img, work.width, work.height);
-  drawOverlay(rect);
-  maybeAutoScan(rect);
+  drawGuide();
+
+  if (Date.now() - lastScanAt > COOLDOWN_MS) {
+    lastScanAt = Date.now();
+    scanFrame();
+  }
 
   rafId = requestAnimationFrame(loop);
 }
 
-function drawOverlay(rect) {
+function drawGuide() {
   const octx = overlay.getContext("2d");
   octx.clearRect(0, 0, overlay.width, overlay.height);
 
-  octx.lineWidth = 4;
-  octx.strokeStyle = "rgba(255,255,255,0.25)";
-  const padX = overlay.width * 0.10;
-  const padY = overlay.height * 0.12;
-  octx.strokeRect(padX, padY, overlay.width - 2 * padX, overlay.height - 2 * padY);
+  // Zielrahmen für Karte (UI)
+  octx.lineWidth = 5;
+  octx.strokeStyle = "rgba(255,255,255,0.22)";
+  const padX = overlay.width * 0.12;
+  const padY = overlay.height * 0.10;
+  octx.strokeRect(padX, padY, overlay.width - 2*padX, overlay.height - 2*padY);
 
-  if (!rect) return;
-
+  // Artwork-Fenster (wo wir hashen)
+  const art = artworkRect();
   octx.lineWidth = 6;
   octx.strokeStyle = "rgba(37,99,235,0.85)";
-  octx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+  octx.strokeRect(art.x, art.y, art.w, art.h);
 }
 
-function maybeAutoScan(rect) {
-  if (!rect) { stableCount = 0; lastRect = null; return; }
+function artworkRect() {
+  // Wir nehmen einen stabilen Bereich in der Kartenmitte (Artwork),
+  // relativ zum Video. Das ist “ManaBox-like” (art-based).
+  const W = work.width, H = work.height;
 
-  const areaRatio = (rect.w * rect.h) / (work.width * work.height);
-  if (areaRatio < 0.12) { stableCount = 0; lastRect = rect; return; }
+  const x = Math.round(W * 0.22);
+  const y = Math.round(H * 0.20);
+  const w = Math.round(W * 0.56);
+  const h = Math.round(H * 0.42);
 
-  if (lastRect) {
-    const tol = Math.max(8, Math.round(work.width * 0.01));
-    const dx = Math.abs(rect.x - lastRect.x);
-    const dy = Math.abs(rect.y - lastRect.y);
-    const dw = Math.abs(rect.w - lastRect.w);
-    const dh = Math.abs(rect.h - lastRect.h);
-    stableCount = (dx < tol && dy < tol && dw < tol && dh < tol) ? stableCount + 1 : 0;
-  }
-  lastRect = rect;
-
-  if (Date.now() - lastScanAt < SCAN_COOLDOWN_MS) return;
-
-  if (stableCount >= 18) {
-    stableCount = 0;
-    lastScanAt = Date.now();
-    autoOCRAndAdd(rect).catch(console.error);
-  }
+  return { x, y, w, h };
 }
 
-async function autoOCRAndAdd(rect) {
-  await ensureOCR();
-  setStatus("scannt...", "Lese Kartencode...");
+function scanFrame() {
+  // crop artwork to canvas
+  const r = artworkRect();
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 192;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(work, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
 
-  // NUR Canvas für OCR (RAM). KEIN toDataURL. KEIN Speichern.
-  const stripCanvas = cropBottomStripCanvas(rect);
+  // compute hash
+  const q = aHashFromCanvas(c);
 
-  const { data } = await ocrWorker.recognize(stripCanvas);
-  const raw = (data.text || "").toUpperCase().replace(/\s+/g, " ").trim();
+  // match
+  const best = bestMatch(q, db);
 
-  const code = extractCardId(raw);
-  if (!code) {
-    setStatus("läuft", `Kein Code gefunden. OCR: ${raw.slice(0, 80)}`);
+  // Threshold: je kleiner desto besser. 0 = identisch.
+  // aHash ist simpel, daher konservativ:
+  if (!best || best.d > 10) {
+    setStatus("läuft", `kein Match (d=${best ? best.d : "?"})`);
     return;
   }
 
-  setStatus("gefunden!", `Code: ${code} (hole Kartendaten...)`);
+  // add to collection
+  addOrInc(best.id);
 
-  const card = await fetchCardData(code);
-
-  addOrIncrement({
-    cardId: code,
-    name: card?.name || code,
-    set: card?.set || card?.set_name || ""
-  });
-
-  setStatus("läuft", `Hinzugefügt: ${code} • ${card?.name || ""}`);
-  try { navigator.vibrate?.(40); } catch {}
+  setStatus("Hinzugefügt", `${best.id} (d=${best.d})`);
+  try { navigator.vibrate?.(30); } catch {}
 }
 
-function cropBottomStripCanvas(rect) {
-  const stripH = Math.round(rect.h * 0.22);
-  const x = clamp(rect.x, 0, work.width - 1);
-  const y = clamp(rect.y + rect.h - stripH, 0, work.height - 1);
-  const w = clamp(rect.w, 1, work.width - x);
-  const h = clamp(stripH, 1, work.height - y);
-
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
-  const cctx = c.getContext("2d");
-
-  cctx.drawImage(work, x, y, w, h, 0, 0, w, h);
-
-  // binarize für OCR
-  const img = cctx.getImageData(0, 0, w, h);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const v = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
-    const vv = v > 150 ? 255 : 0;
-    d[i] = d[i + 1] = d[i + 2] = vv;
-  }
-  cctx.putImageData(img, 0, 0);
-
-  return c;
-}
-
-function extractCardId(text) {
-  const cleaned = text.replace(/[^A-Z0-9\- ]/g, " ");
-
-  // OP01-001 / ST05-002 / EB01-001
-  let m = cleaned.match(/\b(OP|ST|EB)\s*0?(\d{1,2})\s*-\s*(\d{3})\b/);
-  if (m) return `${m[1]}${m[2].padStart(2, "0")}-${m[3]}`;
-
-  // ohne Bindestrich
-  m = cleaned.match(/\b(OP|ST|EB)\s*0?(\d{1,2})\s+(\d{3})\b/);
-  if (m) return `${m[1]}${m[2].padStart(2, "0")}-${m[3]}`;
-
-  // Promo P-001
-  m = cleaned.match(/\bP\s*-\s*(\d{3})\b/) || cleaned.match(/\bP\s+(\d{3})\b/);
-  if (m) return `P-${m[1]}`;
-
-  return null;
-}
-
-async function fetchCardData(cardId) {
-  // Beispiel-API (best effort)
-  const tries = [
-    `https://optcgapi.com/api/sets/card/${encodeURIComponent(cardId)}/`,
-    `https://optcgapi.com/api/decks/card/${encodeURIComponent(cardId)}/`,
-    `https://optcgapi.com/api/promos/card/${encodeURIComponent(cardId)}/`
-  ];
-
-  for (const url of tries) {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) continue;
-      return await r.json();
-    } catch {}
-  }
-  return null;
-}
-
-function addOrIncrement(card) {
-  const idx = collection.findIndex(x => x.cardId === card.cardId);
+function addOrInc(cardId) {
+  const idx = collection.findIndex(x => x.cardId === cardId);
   if (idx >= 0) collection[idx].qty += 1;
-  else collection.unshift({ ...card, qty: 1, createdAt: new Date().toISOString() });
+  else collection.unshift({ cardId, qty: 1 });
   save();
   render();
 }
 
-function detectCardRect(imageData, W, H) {
-  const DS = 3;
-  const w = Math.floor(W / DS);
-  const h = Math.floor(H / DS);
+// --- Hashing ---
+function aHashFromCanvas(canvas) {
+  const size = 8;
+  const tmp = document.createElement("canvas");
+  tmp.width = size;
+  tmp.height = size;
+  const tctx = tmp.getContext("2d", { willReadFrequently: true });
+  tctx.drawImage(canvas, 0, 0, size, size);
 
-  const gray = new Uint8Array(w * h);
-  const data = imageData.data;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const sx = x * DS, sy = y * DS;
-      const idx = (sy * W + sx) * 4;
-      const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-      gray[y * w + x] = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
-    }
+  const img = tctx.getImageData(0, 0, size, size).data;
+  const gray = new Uint8Array(size * size);
+
+  for (let i = 0; i < size * size; i++) {
+    const r = img[i*4], g = img[i*4+1], b = img[i*4+2];
+    gray[i] = (r*0.299 + g*0.587 + b*0.114) | 0;
   }
 
-  const mag = new Uint16Array(w * h);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      const gx =
-        -gray[i - w - 1] - 2 * gray[i - 1] - gray[i + w - 1] +
-        gray[i - w + 1] + 2 * gray[i + 1] + gray[i + w + 1];
-      const gy =
-        -gray[i - w - 1] - 2 * gray[i - w] - gray[i - w + 1] +
-        gray[i + w - 1] + 2 * gray[i + w] + gray[i + w + 1];
-      mag[i] = Math.abs(gx) + Math.abs(gy);
-    }
+  let sum = 0;
+  for (const v of gray) sum += v;
+  const avg = sum / gray.length;
+
+  let bits = "";
+  for (const v of gray) bits += (v >= avg) ? "1" : "0";
+
+  let hex = "";
+  for (let i = 0; i < 64; i += 4) {
+    hex += parseInt(bits.slice(i, i+4), 2).toString(16);
   }
-
-  let sum = 0, cnt = 0;
-  for (let i = 0; i < mag.length; i += 23) { sum += mag[i]; cnt++; }
-  const mean = sum / cnt;
-  const thresh = mean * 2.2;
-
-  const marginX = Math.floor(w * 0.05);
-  const marginY = Math.floor(h * 0.06);
-
-  let minX = w, minY = h, maxX = 0, maxY = 0, hits = 0;
-  for (let y = marginY; y < h - marginY; y++) {
-    for (let x = marginX; x < w - marginX; x++) {
-      const i = y * w + x;
-      if (mag[i] > thresh) {
-        hits++;
-        if (x < minX) minX = x;
-        if (y < minY) minY = y;
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-  if (hits < (w * h) * 0.002) return null;
-
-  const x = minX * DS, y = minY * DS;
-  const rw = (maxX - minX) * DS, rh = (maxY - minY) * DS;
-
-  const ratio = rw / rh;
-  if (ratio < 0.55 || ratio > 0.95) return null;
-  if (rw < W * 0.25 || rh < H * 0.25) return null;
-
-  return { x, y, w: rw, h: rh };
+  return hex;
 }
 
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function hammingHex(a, b) {
+  let dist = 0;
+  for (let i = 0; i < a.length; i++) {
+    const x = parseInt(a[i], 16) ^ parseInt(b[i], 16);
+    dist += ((x & 1) + ((x>>1)&1) + ((x>>2)&1) + ((x>>3)&1));
+  }
+  return dist;
+}
+
+function bestMatch(queryHash, db) {
+  let best = null;
+  for (const item of db) {
+    const d = hammingHex(queryHash, item.hash);
+    if (!best || d < best.d) best = { id: item.id, d };
+  }
+  return best;
+}
+
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  return String(s).replace(/[&<>"']/g, m => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[m]));
 }
 
 render();
