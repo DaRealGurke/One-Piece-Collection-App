@@ -13,27 +13,26 @@
 <body>
   <header>
     <h1>One Piece Collection</h1>
-    <p>Web-App (Live-Scan mit Kamera)</p>
+    <p>Auto-Scan (Karte wird automatisch erkannt & gespeichert)</p>
   </header>
 
   <main>
-    <section class="add">
-      <input id="name" placeholder="Kartenname (z.B. Imu)" />
+    <section class="panel">
+      <button id="startBtn">Auto-Scan starten</button>
+      <button id="stopBtn" class="secondary" hidden>Stop</button>
 
-      <button id="scanBtn">Karte scannen (Live-Kamera)</button>
+      <div class="camWrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
 
-      <video id="video" autoplay playsinline></video>
-      <button id="captureBtn" class="secondary" hidden>Scan aufnehmen</button>
-
-      <canvas id="canvas" hidden></canvas>
-
-      <img id="preview" alt="Vorschau" />
-
-      <button id="addBtn">Hinzufügen</button>
-      <p class="hint">Tipp: Tippe auf eine gespeicherte Karte, um sie zu löschen.</p>
+      <p class="hint">
+        Hinweis: Kamera startet aus Sicherheitsgründen erst nach einem Klick (Safari/iOS-Regel).
+        Danach erkennt die App Karten automatisch.
+      </p>
     </section>
 
-    <section>
+    <section class="panel">
       <h2>Sammlung</h2>
       <ul id="list"></ul>
     </section>
@@ -42,3 +41,4 @@
   <script src="app.js"></script>
 </body>
 </html>
+
