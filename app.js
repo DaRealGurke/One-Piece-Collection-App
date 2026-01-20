@@ -1,4 +1,3 @@
-// ===== Elements =====
 const list = document.getElementById("list");
 const video = document.getElementById("video");
 const overlay = document.getElementById("overlay");
@@ -7,35 +6,27 @@ const stopBtn = document.getElementById("stopBtn");
 const statusText = document.getElementById("statusText");
 const lastHit = document.getElementById("lastHit");
 
-// ===== Storage (NO IMAGES STORED) =====
-const LS_KEY = "opc_collection_artscan_v2";
+const LS_KEY = "opc_collection_artscan_dhash_v1";
 let collection = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
 
-// ===== Hash DB =====
-let db = null; // [{id, hash}, ...]
-
-// ===== Camera / Loop =====
+let db = null;
 let stream = null;
 let rafId = null;
 
-// Work canvas for analysis (RAM only)
 const work = document.createElement("canvas");
 const wctx = work.getContext("2d", { willReadFrequently: true });
 
-// Stability for card rectangle
 let stableCount = 0;
 let lastRect = null;
 
-// Cooldown: avoid adding 10x
 let lastScanAt = 0;
-const SCAN_INTERVAL_MS = 350;     // how often we attempt matching
-const ADD_COOLDOWN_MS = 1200;     // minimum time between adds
+const SCAN_INTERVAL_MS = 350;
+let lastAddAt = 0;
+const ADD_COOLDOWN_MS = 1200;
 
-// Match threshold (aHash Hamming distance)
-const MATCH_THRESHOLD = 12;       // tighter = fewer false positives
+const MATCH_THRESHOLD = 18; // dHash ist etwas "rauschiger" -> höherer Threshold
 const DEBUG_TOP_K = 5;
 
-// ===== UI =====
 function setStatus(s, extra = "") {
   statusText.textContent = s;
   lastHit.textContent = extra;
@@ -52,7 +43,7 @@ function render() {
     const li = document.createElement("li");
     li.innerHTML = `
       <strong>${escapeHtml(c.name || c.cardId)}</strong>
-      <div class="meta">${escapeHtml(c.cardId)} • x${c.qty} • ${escapeHtml(c.set || "")}</div>
+      <div class="meta">${escapeHtml(c.cardId)} • x${c.qty}</div>
     `;
     li.onclick = () => {
       const ok = confirm(`Eintrag löschen?\n\n${c.cardId}`);
@@ -73,17 +64,15 @@ function addOrInc(cardId) {
   render();
 }
 
-// ===== Load hashes.json =====
 async function loadHashes() {
   const r = await fetch("./hashes.json", { cache: "no-store" });
   if (!r.ok) throw new Error("hashes.json nicht gefunden (404).");
   const data = await r.json();
-  if (!Array.isArray(data)) throw new Error("hashes.json hat falsches Format.");
+  if (!Array.isArray(data)) throw new Error("hashes.json falsches Format.");
   if (data.length === 0) throw new Error("hashes.json ist leer ([]).");
   return data;
 }
 
-// ===== Start/Stop =====
 startBtn.onclick = async () => {
   try {
     if (!db) {
@@ -151,7 +140,6 @@ function stopAll() {
   setStatus("bereit");
 }
 
-// ===== Main loop =====
 function loop() {
   wctx.drawImage(video, 0, 0, work.width, work.height);
   const frame = wctx.getImageData(0, 0, work.width, work.height);
@@ -159,42 +147,31 @@ function loop() {
   const cardRect = detectCardRect(frame, work.width, work.height);
   drawOverlay(cardRect);
 
-  // stabilize cardRect
   const stableRect = stabilize(cardRect);
-
   const now = Date.now();
+
   if (stableRect && (now - lastScanAt) > SCAN_INTERVAL_MS) {
     lastScanAt = now;
     tryMatch(stableRect);
   } else if (!stableRect) {
-    setStatus("läuft", "keine Karte erkannt (versuch: mehr Licht / weniger Spiegelung / Karte näher)");
+    setStatus("läuft", "keine Karte erkannt (mehr Licht / weniger Spiegelung / Karte näher)");
   }
 
   rafId = requestAnimationFrame(loop);
 }
 
 function stabilize(rect) {
-  if (!rect) {
-    stableCount = 0;
-    lastRect = null;
-    return null;
-  }
+  if (!rect) { stableCount = 0; lastRect = null; return null; }
 
-  // must be large enough
   const areaRatio = (rect.w * rect.h) / (work.width * work.height);
-  if (areaRatio < 0.12) {
-    stableCount = 0;
-    lastRect = rect;
-    return null;
-  }
+  if (areaRatio < 0.12) { stableCount = 0; lastRect = rect; return null; }
 
   if (lastRect) {
-    const tol = Math.max(10, Math.round(work.width * 0.012)); // ~1.2% width
+    const tol = Math.max(10, Math.round(work.width * 0.012));
     const dx = Math.abs(rect.x - lastRect.x);
     const dy = Math.abs(rect.y - lastRect.y);
     const dw = Math.abs(rect.w - lastRect.w);
     const dh = Math.abs(rect.h - lastRect.h);
-
     if (dx < tol && dy < tol && dw < tol && dh < tol) stableCount++;
     else stableCount = 0;
   } else {
@@ -202,39 +179,27 @@ function stabilize(rect) {
   }
 
   lastRect = rect;
-
-  // need a short stability before matching
-  if (stableCount < 6) return null; // ~100-200ms depending fps
+  if (stableCount < 6) return null;
   return rect;
 }
 
-// ===== Matching =====
-let lastAddAt = 0;
-
 function tryMatch(cardRect) {
-  // Crop artwork INSIDE the detected card
   const art = artworkRectFromCard(cardRect);
 
-  // Draw small crop to canvas (for hashing)
   const c = document.createElement("canvas");
   c.width = 256;
   c.height = 192;
   const ctx = c.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(work, art.x, art.y, art.w, art.h, 0, 0, c.width, c.height);
 
-  const qHash = aHashFromCanvas(c);
+  const qHash = dHashFromCanvas(c);
   const top = topMatches(qHash, db, DEBUG_TOP_K);
   const best = top[0];
 
-  // Always show debug top-k
-  setStatus(
-    "läuft",
-    `Top: ${top.map(t => `${t.id}:${t.d}`).join(" | ")}`
-  );
+  setStatus("läuft", `Top: ${top.map(t => `${t.id}:${t.d}`).join(" | ")}`);
 
   if (!best) return;
 
-  // Decide add
   if (best.d <= MATCH_THRESHOLD && (Date.now() - lastAddAt) > ADD_COOLDOWN_MS) {
     lastAddAt = Date.now();
     addOrInc(best.id);
@@ -244,8 +209,6 @@ function tryMatch(cardRect) {
 }
 
 function artworkRectFromCard(r) {
-  // Heuristic artwork area within a One Piece card
-  // (works across sets better than using "video center")
   const x = Math.round(r.x + r.w * 0.12);
   const y = Math.round(r.y + r.h * 0.18);
   const w = Math.round(r.w * 0.76);
@@ -253,33 +216,35 @@ function artworkRectFromCard(r) {
   return clampRect({ x, y, w, h }, work.width, work.height);
 }
 
-// ===== Hashing (aHash, MUST match your generator) =====
-function aHashFromCanvas(canvas) {
-  const size = 8;
+// ---- dHash (9x8 -> 64 bit) ----
+function dHashFromCanvas(canvas) {
+  const w = 9, h = 8;
   const tmp = document.createElement("canvas");
-  tmp.width = size;
-  tmp.height = size;
+  tmp.width = w;
+  tmp.height = h;
   const tctx = tmp.getContext("2d", { willReadFrequently: true });
-  tctx.drawImage(canvas, 0, 0, size, size);
+  tctx.drawImage(canvas, 0, 0, w, h);
 
-  const img = tctx.getImageData(0, 0, size, size).data;
-  const gray = new Uint8Array(size * size);
+  const img = tctx.getImageData(0, 0, w, h).data;
+  const gray = new Uint8Array(w * h);
 
-  for (let i = 0; i < size * size; i++) {
-    const r = img[i * 4], g = img[i * 4 + 1], b = img[i * 4 + 2];
-    gray[i] = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+  for (let i = 0; i < w * h; i++) {
+    const r = img[i*4], g = img[i*4+1], b = img[i*4+2];
+    gray[i] = (r*0.299 + g*0.587 + b*0.114) | 0;
   }
 
-  let sum = 0;
-  for (const v of gray) sum += v;
-  const avg = sum / gray.length;
-
   let bits = "";
-  for (const v of gray) bits += (v >= avg) ? "1" : "0";
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w - 1; x++) {
+      const left = gray[y*w + x];
+      const right = gray[y*w + x + 1];
+      bits += (left < right) ? "1" : "0";
+    }
+  }
 
   let hex = "";
   for (let i = 0; i < 64; i += 4) {
-    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+    hex += parseInt(bits.slice(i, i+4), 2).toString(16);
   }
   return hex;
 }
@@ -288,7 +253,7 @@ function hammingHex(a, b) {
   let dist = 0;
   for (let i = 0; i < a.length; i++) {
     const x = parseInt(a[i], 16) ^ parseInt(b[i], 16);
-    dist += ((x & 1) + ((x >> 1) & 1) + ((x >> 2) & 1) + ((x >> 3) & 1));
+    dist += ((x & 1) + ((x>>1)&1) + ((x>>2)&1) + ((x>>3)&1));
   }
   return dist;
 }
@@ -299,11 +264,7 @@ function topMatches(queryHash, db, k = 5) {
     const d = hammingHex(queryHash, item.hash);
     let inserted = false;
     for (let i = 0; i < best.length; i++) {
-      if (d < best[i].d) {
-        best.splice(i, 0, { id: item.id, d });
-        inserted = true;
-        break;
-      }
+      if (d < best[i].d) { best.splice(i, 0, { id: item.id, d }); inserted = true; break; }
     }
     if (!inserted) best.push({ id: item.id, d });
     if (best.length > k) best.pop();
@@ -311,7 +272,7 @@ function topMatches(queryHash, db, k = 5) {
   return best;
 }
 
-// ===== Card rectangle detection (edge-based heuristic) =====
+// ---- Card rectangle detection ----
 function detectCardRect(imageData, W, H) {
   const DS = 3;
   const w = Math.floor(W / DS);
@@ -347,7 +308,6 @@ function detectCardRect(imageData, W, H) {
     }
   }
 
-  // adaptive threshold
   let sum = 0, cnt = 0;
   for (let i = 0; i < mag.length; i += 29) { sum += mag[i]; cnt++; }
   const mean = sum / cnt;
@@ -378,22 +338,17 @@ function detectCardRect(imageData, W, H) {
   const rw = (maxX - minX) * DS;
   const rh = (maxY - minY) * DS;
 
-  // must resemble portrait card ratio
   const ratio = rw / rh;
   if (ratio < 0.55 || ratio > 0.95) return null;
-
-  // must be large
   if (rw < W * 0.25 || rh < H * 0.25) return null;
 
   return clampRect({ x, y, w: rw, h: rh }, W, H);
 }
 
-// ===== Overlay drawing =====
 function drawOverlay(cardRect) {
   const octx = overlay.getContext("2d");
   octx.clearRect(0, 0, overlay.width, overlay.height);
 
-  // Guide frame
   octx.lineWidth = 4;
   octx.strokeStyle = "rgba(255,255,255,0.20)";
   const padX = overlay.width * 0.12;
@@ -402,19 +357,16 @@ function drawOverlay(cardRect) {
 
   if (!cardRect) return;
 
-  // Card rect
   octx.lineWidth = 6;
   octx.strokeStyle = "rgba(37,99,235,0.85)";
   octx.strokeRect(cardRect.x, cardRect.y, cardRect.w, cardRect.h);
 
-  // Artwork rect inside card
   const art = artworkRectFromCard(cardRect);
   octx.lineWidth = 5;
   octx.strokeStyle = "rgba(34,197,94,0.75)";
   octx.strokeRect(art.x, art.y, art.w, art.h);
 }
 
-// ===== Helpers =====
 function clampRect(r, W, H) {
   const x = clamp(r.x, 0, W - 1);
   const y = clamp(r.y, 0, H - 1);
@@ -422,10 +374,7 @@ function clampRect(r, W, H) {
   const h = clamp(r.h, 1, H - y);
   return { x, y, w, h };
 }
-
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, m => ({
@@ -433,6 +382,5 @@ function escapeHtml(s) {
   }[m]));
 }
 
-// ===== init =====
 render();
 setStatus("bereit");
