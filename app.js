@@ -436,4 +436,3 @@ function escapeHtml(s) {
 // ===== init =====
 render();
 setStatus("bereit");
-
