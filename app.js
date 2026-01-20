@@ -1,15 +1,23 @@
 const list = document.getElementById("list");
-const nameInput = document.getElementById("name");
-const preview = document.getElementById("preview");
-
 const video = document.getElementById("video");
-const canvas = document.getElementById("canvas");
-const scanBtn = document.getElementById("scanBtn");
-const captureBtn = document.getElementById("captureBtn");
-const addBtn = document.getElementById("addBtn");
+const overlay = document.getElementById("overlay");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
 
 let cards = JSON.parse(localStorage.getItem("cards") || "[]");
 let stream = null;
+let rafId = null;
+
+// interne Canvas für Bildanalyse
+const work = document.createElement("canvas");
+const wctx = work.getContext("2d", { willReadFrequently: true });
+
+let lastCaptureAt = 0;
+const CAPTURE_COOLDOWN_MS = 2500;
+
+// Stabilitätslogik
+let stableCount = 0;
+let lastRect = null;
 
 function save() {
   localStorage.setItem("cards", JSON.stringify(cards));
@@ -17,23 +25,17 @@ function save() {
 
 function render() {
   list.innerHTML = "";
-
   cards.forEach((c, i) => {
     const li = document.createElement("li");
+    const strong = document.createElement("strong");
+    strong.textContent = c.name;
+    li.appendChild(strong);
 
-    const title = document.createElement("strong");
-    title.textContent = c.name;
+    const img = document.createElement("img");
+    img.src = c.img;
+    img.alt = c.name;
+    li.appendChild(img);
 
-    li.appendChild(title);
-
-    if (c.img) {
-      const img = document.createElement("img");
-      img.src = c.img;
-      img.alt = c.name;
-      li.appendChild(img);
-    }
-
-    // Tap to delete (simple)
     li.onclick = () => {
       const ok = confirm(`Karte löschen?\n\n${c.name}`);
       if (!ok) return;
@@ -46,79 +48,73 @@ function render() {
   });
 }
 
+function now() {
+  return Date.now();
+}
+
+function stopAll() {
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = null;
+
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  video.srcObject = null;
+
+  stableCount = 0;
+  lastRect = null;
+
+  stopBtn.hidden = true;
+  startBtn.hidden = false;
+
+  // Overlay clear
+  const octx = overlay.getContext("2d");
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+}
+
 async function startCamera() {
-  // stop old stream if any
-  stopCamera();
+  stopAll();
 
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" }
+      video: {
+        facingMode: "environment",
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
     });
 
     video.srcObject = stream;
-    video.style.display = "block";
-    captureBtn.hidden = false;
+    await video.play();
 
-    // hide previous preview until captured
-    preview.style.display = "none";
-    preview.src = "";
-  } catch (err) {
-    alert("Kamera konnte nicht geöffnet werden. Bitte in Safari erlauben (https erforderlich).");
-    console.error(err);
+    startBtn.hidden = true;
+    stopBtn.hidden = false;
+
+    // Canvas Größen auf Videodimensionen setzen (nachdem Metadata da ist)
+    await new Promise(res => {
+      if (video.videoWidth) return res();
+      video.onloadedmetadata = () => res();
+    });
+
+    // Overlay an Videogröße koppeln (wichtig: echte Pixel, nicht CSS)
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+
+    // work canvas ebenfalls
+    work.width = video.videoWidth;
+    work.height = video.videoHeight;
+
+    loop();
+  } catch (e) {
+    alert("Kamera konnte nicht geöffnet werden. Bitte Kamera erlauben (Safari) und HTTPS nutzen (GitHub Pages ist ok).");
+    console.error(e);
+    stopAll();
   }
 }
 
-function stopCamera() {
-  if (!stream) return;
-  stream.getTracks().forEach(t => t.stop());
-  stream = null;
-  video.srcObject = null;
-  video.style.display = "none";
-  captureBtn.hidden = true;
-}
+startBtn.onclick = startCamera;
+stopBtn.onclick = stopAll;
 
-function captureFrame() {
-  if (!video.videoWidth || !video.videoHeight) {
-    alert("Kamera ist noch nicht bereit. Bitte 1 Sekunde warten und nochmal versuchen.");
-    return;
-  }
-
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(video, 0, 0);
-
-  preview.src = canvas.toDataURL("image/png");
-  preview.style.display = "block";
-
-  stopCamera();
-}
-
-scanBtn.onclick = startCamera;
-captureBtn.onclick = captureFrame;
-
-addBtn.onclick = () => {
-  const name = (nameInput.value || "").trim();
-  const img = preview.src;
-
-  if (!name) {
-    alert("Bitte Kartenname eingeben.");
-    return;
-  }
-  if (!img) {
-    alert("Bitte zuerst scannen (Scan aufnehmen).");
-    return;
-  }
-
-  cards.unshift({ name, img, createdAt: new Date().toISOString() });
-
-  nameInput.value = "";
-  preview.src = "";
-  preview.style.display = "none";
-
-  save();
-  render();
-};
-
-render();
+function
