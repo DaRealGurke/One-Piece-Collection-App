@@ -7,18 +7,20 @@
 
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#111827">
-
   <link rel="stylesheet" href="style.css">
+
+  <!-- OCR (Tesseract.js v5) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
   <header>
     <h1>One Piece Collection</h1>
-    <p>Auto-Scan (Karte wird automatisch erkannt & gespeichert)</p>
+    <p>ManaBox-Style: Auto-Erkennung → Code-OCR → Auto hinzufügen (ohne Foto speichern)</p>
   </header>
 
   <main>
     <section class="panel">
-      <button id="startBtn">Auto-Scan starten</button>
+      <button id="startBtn">Scan starten</button>
       <button id="stopBtn" class="secondary" hidden>Stop</button>
 
       <div class="camWrap">
@@ -26,9 +28,13 @@
         <canvas id="overlay"></canvas>
       </div>
 
+      <div class="status">
+        <div><strong>Status:</strong> <span id="statusText">bereit</span></div>
+        <div class="small" id="lastHit"></div>
+      </div>
+
       <p class="hint">
-        Hinweis: Kamera startet aus Sicherheitsgründen erst nach einem Klick (Safari/iOS-Regel).
-        Danach erkennt die App Karten automatisch.
+        iPhone/Safari: Kamera darf erst nach einem Klick starten. Danach läuft der Scan automatisch.
       </p>
     </section>
 
@@ -41,4 +47,3 @@
   <script src="app.js"></script>
 </body>
 </html>
-
