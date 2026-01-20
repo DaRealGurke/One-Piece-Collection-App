@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>One Piece Collection</title>
+
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#111827">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>One Piece Collection</h1>
+    <p>Web-App (ohne Node.js)</p>
+  </header>
+
+  <main>
+    <section class="add">
+      <input id="name" placeholder="Kartenname (z.B. Imu)" />
+      <button id="photoBtn">Foto / Scan</button>
+      <button id="addBtn">Hinzufügen</button>
+      <input id="file" type="file" accept="image/*" capture="environment" hidden />
+      <img id="preview" />
+    </section>
+
+    <section>
+      <h2>Sammlung</h2>
+      <ul id="list"></ul>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

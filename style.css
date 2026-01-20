@@ -1,0 +1,42 @@
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont;
+  background: #0b1220;
+  color: white;
+}
+
+header {
+  padding: 16px;
+  background: #111827;
+}
+
+main {
+  padding: 16px;
+}
+
+input, button {
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  border: none;
+}
+
+button {
+  background: #2563eb;
+  color: white;
+  font-weight: bold;
+}
+
+img {
+  width: 100%;
+  margin-top: 10px;
+  border-radius: 12px;
+}
+
+li {
+  background: rgba(255,255,255,0.1);
+  padding: 10px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+}
