@@ -5,22 +5,26 @@ from io import BytesIO
 import requests
 from PIL import Image
 
-# ================= CONFIG =================
 OUT_FILE = "hashes.json"
 
-# OPTCG API – englische Karten
 ALL_SET_CARDS = "https://optcgapi.com/api/allSetCards/"
 ALL_ST_CARDS  = "https://optcgapi.com/api/allSTCards/"
 
-# Schonend für die API
 SLEEP = 0.05
-# =========================================
 
 
 def fetch_json(url):
     r = requests.get(url, timeout=60)
     r.raise_for_status()
     return r.json()
+
+
+def normalize_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
+        return data["results"]
+    return []
 
 
 def download_image(url):
@@ -31,10 +35,7 @@ def download_image(url):
 
 def crop_artwork(img):
     """
-    Grober, robuster Artwork-Crop (funktioniert set-übergreifend):
-    - links/rechts: 12%
-    - oben: 18%
-    - unten: 28%
+    Robust: mittlerer Artwork-Bereich (weg von Header/Textbox).
     """
     w, h = img.size
     left   = int(w * 0.12)
@@ -44,32 +45,30 @@ def crop_artwork(img):
     return img.crop((left, top, right, bottom))
 
 
-def ahash_hex(img, size=8):
+def dhash_hex(img, w=9, h=8):
     """
-    aHash (64 bit) → 16 hex chars
+    dHash 64-bit:
+    - resize to 9x8 grayscale
+    - compare adjacent pixels horizontally (8 comparisons per row * 8 rows = 64 bits)
+    returns 16 hex chars
     """
-    small = img.resize((size, size), Image.BILINEAR).convert("L")
+    small = img.resize((w, h), Image.BILINEAR).convert("L")
     px = list(small.getdata())
-    avg = sum(px) / len(px)
 
-    bits = [(1 if v >= avg else 0) for v in px]
+    bits = []
+    for y in range(h):
+        row = px[y * w:(y + 1) * w]
+        for x in range(w - 1):
+            bits.append(1 if row[x] < row[x + 1] else 0)
 
     out = ""
     for i in range(0, 64, 4):
-        nibble = (
-            (bits[i] << 3)
-            | (bits[i + 1] << 2)
-            | (bits[i + 2] << 1)
-            | bits[i + 3]
-        )
+        nibble = (bits[i] << 3) | (bits[i+1] << 2) | (bits[i+2] << 1) | bits[i+3]
         out += format(nibble, "x")
     return out
 
 
 def pick_image_url(card):
-    """
-    OPTCG API nutzt 'card_image' für die Bild-URL
-    """
     candidates = [
         "card_image",
         "image_url", "image", "img",
@@ -84,9 +83,6 @@ def pick_image_url(card):
 
 
 def pick_card_id(card):
-    """
-    OPTCG API nutzt 'card_set_id' (z.B. OP01-001)
-    """
     candidates = [
         "card_set_id",
         "card_id", "cardId", "id",
@@ -99,19 +95,10 @@ def pick_card_id(card):
     return None
 
 
-def normalize_list(data):
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
-        return data["results"]
-    return []
-
-
 def main():
     print("Fetching card lists...")
     set_cards = normalize_list(fetch_json(ALL_SET_CARDS))
     st_cards  = normalize_list(fetch_json(ALL_ST_CARDS))
-
     all_cards = set_cards + st_cards
     print(f"Total cards received: {len(all_cards)}")
 
@@ -130,23 +117,18 @@ def main():
         try:
             img = download_image(img_url)
             art = crop_artwork(img)
-            h = ahash_hex(art)
-            out.append({
-                "id": card_id,
-                "hash": h
-            })
+            h = dhash_hex(art)
+            out.append({"id": card_id, "hash": h})
             seen.add(card_id)
-        except Exception as e:
-            # Einzelne Fehler ignorieren
+        except Exception:
             pass
 
         if idx % 100 == 0:
-            print(f"Processed {idx}/{len(all_cards)}")
+            print(f"Processed {idx}/{len(all_cards)} | hashes={len(out)}")
 
         time.sleep(SLEEP)
 
     out.sort(key=lambda x: x["id"])
-
     with open(OUT_FILE, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False)
 
